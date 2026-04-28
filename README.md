@@ -1,47 +1,51 @@
-# Distributed Worker System (v1 - Simulation)
+# Distributed Worker System (v2 - Multi-Process Queue)
 
 ## Overview
 
-> This is v1 of a multi-stage project evolving into a fully distributed system.
+> This is v2 of a multi-stage project evolving into a fully distributed system.
 
-This project is a simulation of a distributed worker system, designed to demonstrate core concepts such as task scheduling, worker coordination, and concurrent execution.
+This version transitions from a simulated, thread-based system to a **multi-process architecture** where workers operate as independent OS processes and communicate via a shared task queue.
 
-In this version (v1), the system runs within a single process but models how a leader assigns tasks to multiple workers, which process them concurrently using threads.
+The system now follows a **pull-based model**, where workers fetch tasks independently rather than being assigned work directly by the leader.
 
 ---
 
 ## Architecture
 
-The system consists of three main components:
-
 ### Leader
-- Maintains a queue of tasks
-- Tracks available workers
-- Assigns tasks to idle workers
+- Starts and manages worker processes
+- Enqueues tasks into a shared queue
+- Signals workers to shut down after tasks are complete
 
-### Worker
-- Represents an execution unit
-- Processes tasks in a separate thread
-- Transitions between `IDLE` and `ACTIVE` states
+### Worker (Process)
+- Runs as an independent OS process
+- Continuously pulls tasks from the shared queue (blocking)
+- Processes tasks and updates internal state
+- Shuts down gracefully upon receiving a sentinel signal
 
 ### Task
 - Represents a unit of work
 - Moves through states:
   - `PENDING → IN_PROGRESS → DONE`
 
+### Shared Queue
+- Implemented using `multiprocessing.Queue`
+- Acts as the central coordination mechanism
+- Enables decoupling between leader and workers
+
 ---
 
 ## Execution Flow
 
-1. Tasks are created and added to the leader's queue
-2. The leader continuously:
-   - finds an idle worker
-   - assigns a task
-3. Workers process tasks concurrently using threads
-4. Once completed:
-   - worker becomes idle
-   - task is marked as done
-5. Leader waits for all tasks to finish before exiting
+1. Leader initializes workers and starts processes
+2. Leader enqueues all tasks into the shared queue
+3. Workers:
+   - block on queue (`get()`)
+   - pick tasks as they become available
+   - process tasks independently
+4. Leader sends sentinel values (`None`) to signal shutdown
+5. Workers exit gracefully after completing assigned work
+6. Leader waits for all workers to finish (`join()`)
 
 ---
 
@@ -50,55 +54,5 @@ The system consists of three main components:
 ```bash
 python main.py --num_workers=4 --num_tasks=10
 ```
-
----
-
-## Sample Output
-
-```bash
-(12) Starting Processing: 10 tasks: 4 workers ...
-(12) Leader assigning Task 1 to Worker A
-(12) Worker A: Task 1: Starting processing
-(12) Leader assigning Task 2 to Worker B
-(12) Worker B: Task 2: Starting processing
-...
-(15) Worker A: Task 1: Completed
-(15) Worker A is now IDLE
-...
-(18) Finished Processing ...
-```
-
----
-
-## Key Concepts Demonstrated
-- Centralized task scheduling
-- Worker pool model
-- Concurrent task execution using threads
-- Basic task lifecycle management
-- State-based worker availability
-
----
-
-## Limitations (v1)
-- Runs in a single process (not truly distributed)
-- Leader directly assigns tasks (push-based model)
-- No fault tolerance (worker/leader crashes not handled)
-- No shared state across processes
-- No load balancing beyond simple availability check
-
----
-
-## Future Improvements
-- Introduce shared queue using Redis
-- Transition to pull-based worker model
-- Implement leader election
-- Add failure handling and task reassignment
-- Introduce rate limiting and system metrics
-
----
-
-## Tech Stack
-- Python
-- threading (for concurrency)
 
 ---

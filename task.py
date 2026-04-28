@@ -1,13 +1,16 @@
 from enum import Enum
-import uuid
+
 
 class Task:
     class Status(Enum):
         PENDING = "pending"
         IN_PROGRESS = "in_progress"
         DONE = "done"
-    
-    def __init__ (self, id):
-        self.id = uuid.uuid4() if id is None else id
+
+    def __init__(self, id):
+        self.id = id
         self.payload = None
-        self.status = self.Status.PENDING
+        self.status = Task.Status.PENDING
+
+    def __repr__(self):
+        return f"Task(id={self.id}, status={self.status.value})"
