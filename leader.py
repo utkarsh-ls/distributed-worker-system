@@ -1,39 +1,24 @@
-import multiprocessing
 from time import perf_counter
 
 from task import Task
-from worker import Worker
+from infra.task_queue import TaskQueue
 
 
 class Leader:
     """
-    The Leader owns the shared task queue and a pool of Worker processes.
+    The Leader pushes tasks into the queue. No knowledge of workers (akin to a producer).
     """
-    
-    def __init__(self, tasks: list[Task], workers: list[Worker]):
+
+    def __init__(self, tasks: list[Task], host: str = "127.0.0.1", port: int = 6379):
         self.tasks = tasks
-        self.workers = workers
+        self.queue = TaskQueue(host, port)
 
     def run(self):
         num_tasks = len(self.tasks)
-        num_workers = len(self.workers)
-        print(f"({int(perf_counter())%100:02d}) Leader: starting - {num_tasks} tasks: {num_workers} workers")
+        print(f"({int(perf_counter())%100:02d}) Leader: starting {num_tasks} tasks, queue size {self.queue.depth()}")
 
-        # Step 1: Start all worker processes
-        for worker in self.workers:
-            worker.start()
-            
-        # Step 2: Enqueue all tasks
-        # All workers share the same task queue
         for task in self.tasks:
-            self.workers[0].task_queue.put(task)
+            qsize = self.queue.push(task)
+            print(f"({int(perf_counter())%100:02d}) Leader: Enqueued Task {task.id}, Queue size {qsize}")
 
-        # Step 3: Send one sentinel (None) per worker to signal shutdown
-        for _ in self.workers:
-            self.workers[0].task_queue.put(None)
-        
-        # Step 4: Wait for all workers to finish
-        for worker in self.workers:
-            worker.join()
-        
-        print(f"({int(perf_counter())%100}) Leader: All tasks complete")
+        print(f"({int(perf_counter())%100:02d}) Leader: All tasks enqueued")
