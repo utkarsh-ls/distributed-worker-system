@@ -8,9 +8,9 @@ class Task:
         IN_PROGRESS = "in_progress"
         DONE = "done"
 
-    def __init__(self, id):
+    def __init__(self, id: int | str, payload: dict):
         self.id = id
-        self.payload = None
+        self.payload = payload
         self.status = Task.Status.PENDING
 
     def to_dict(self):
@@ -22,8 +22,7 @@ class Task:
     
     @classmethod
     def from_dict(cls, data: dict) -> Task:
-        task = cls(id=data["id"])
-        task.payload = data.get("payload")
+        task = cls(id=data["id"], payload = data.get("payload"))
         task.status = Task.Status(data["status"])
         
         return task

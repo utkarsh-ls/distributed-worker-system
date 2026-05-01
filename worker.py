@@ -1,22 +1,15 @@
 from __future__ import annotations
 import multiprocessing
+import threading
 from time import sleep, perf_counter
 from enum import Enum
 
 from task import Task
 from infra.task_queue import TaskQueue
-
-MAX_IDLE_CYCLES = 3  # exit after this many consecutive timeouts
+from infra.config import HEARTBEAT_INTERVAL, MAX_IDLE_CYCLES, TASK_COMPLETION_TIME
 
 
 class Worker(multiprocessing.Process):
-    """
-    A fully independent OS process, knows nothing about the leader (akin to a consumer). Connects to queue directly, repeatedly pops and executes tasks.
-
-    State transitions:
-        IDLE -> ACTIVE  (when a task is picked up)
-        ACTIVE -> IDLE  (when the task completes)
-    """
 
     class State(Enum):
         ACTIVE = "active"
@@ -35,40 +28,90 @@ class Worker(multiprocessing.Process):
         # Shared memory state flag (readable by external monitors)
         self._state_code = multiprocessing.Value('i', self._STATE_IDLE)
 
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+    
     @property
     def state(self) -> Worker.State:
         """Read the worker's current state (safe to call from any process)."""
         with self._state_code.get_lock():
             code = self._state_code.value
         return Worker.State.IDLE if code == self._STATE_IDLE else Worker.State.ACTIVE
-
+    
+    # ------------------------------------------------------------------
+    # Internal Helpers
+    # ------------------------------------------------------------------
+    
+    def _start_heartbeat(self, task_id) -> threading.Event:
+        stop_event = threading.Event()
+        
+        def _beat():
+            while not stop_event.is_set():
+                stop_event.wait(timeout=HEARTBEAT_INTERVAL)
+                if stop_event.is_set():
+                    break
+                
+                still_valid = self._queue.heartbeat(task_id)
+                if not still_valid:
+                    print(f"({int(perf_counter()) % 100:02d}) Worker {self.worker_id}: Task {task_id}: processing key gone, watchdog reclaimed it")
+                    stop_event.set()
+        
+        t = threading.Thread(target=_beat, daemon=True)
+        t.start()
+        return stop_event
+    
     def _set_state(self, state: Worker.State):
         with self._state_code.get_lock():
             self._state_code.value = self._STATE_IDLE if state == Worker.State.IDLE else self._STATE_ACTIVE
 
-    def _execute(self, task: Task):
-        """Simulate task execution"""
+    def _execute(self, task: Task) -> bool:
+        """
+        Execute the task, heartbeating throughout.
+        Returns True if completed successfully, False if reclaimed.
+        """
         # Task execution
         print(f"({int(perf_counter())%100:02d}) Worker {self.worker_id}: Task {task.id}: Starting processing")
-        sleep(3)
+        stop_heartbeat = self._start_heartbeat(task.id)
+        
+        # Simulate work
+        sleep(TASK_COMPLETION_TIME)
+        
+        # Check if the watchdog reclaimed task while this worker was executing it
+        if stop_heartbeat.is_set():
+            print(f"({int(perf_counter()) % 100:02d}) Worker {self.worker_id}: Task {task.id}: Aborted, reclaimed by watchdog")
+            return False
+        
+        # Task is complete, Signal hearbeat to stop
+        stop_heartbeat.set()
         print(f"({int(perf_counter())%100:02d}) Worker {self.worker_id}: Task {task.id}: Completed")
+        
+        return True
+
+
+    # ------------------------------------------------------------------
+    # Main process
+    # ------------------------------------------------------------------
 
     def run(self):
         """
-        Worker loop to execute tasks.
+        Worker loop runs continously to execute tasks.
+        
+        Queue connection is created after process forks, as redis connections are not reliable across fork boundaries.
 
         Shutdown contract:
             The worker exits naturally when BRPOP times out consecutively for MAX_IDLE_CYCLES cycles.
         """
 
-        queue = TaskQueue(self.host, self.port)
+        self._queue = TaskQueue(self.host, self.port)
         idle_cycles = 0
 
         print(f"({int(perf_counter())%100:02d}) Worker {self.worker_id}: started process (pid={self.pid})")
 
         while idle_cycles < MAX_IDLE_CYCLES:
             # Blocks until a task is available up to TIMEOUT seconds
-            task = queue.pop()
+            task = self._queue.pop()
 
             if task is None:
                 idle_cycles += 1
@@ -80,7 +123,9 @@ class Worker(multiprocessing.Process):
             print(f"({int(perf_counter())%100:02d}) Worker {self.worker_id}: ACTIVE")
             task.status = Task.Status.IN_PROGRESS
 
-            self._execute(task)
+            success = self._execute(task)
+            if success:
+                self._queue.acknowledge(task.id)
 
             task.status = Task.Status.DONE
             self._set_state(Worker.State.IDLE)
