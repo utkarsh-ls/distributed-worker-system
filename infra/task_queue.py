@@ -3,14 +3,17 @@ import redis
 from typing import Optional
 
 from task import Task
-from infra.config import QUEUE_KEY, PROCESSING_KEY, PROCESSING_TTL, BRPOP_TIMEOUT, EXPIRY_CHECK_THRESHOLD
+from infra.config import (
+    REDIS_HOST, REDIS_PORT, REDIS_DB, 
+    QUEUE_KEY, PROCESSING_KEY,
+    PROCESSING_TTL, BRPOP_TIMEOUT, EXPIRY_CHECK_THRESHOLD
+)
 
 
 class TaskQueue:
-    def __init__(self, host: str = "127.0.0.1", port: int = 6379, db: int = 0):
+    def __init__(self, host: str = REDIS_HOST, port: int = REDIS_PORT, db: int = REDIS_DB):
         # Enable decode_response to return string instead of bytes
-        self._r = redis.Redis(host=host, port=port,
-                              db=db, decode_responses=True)
+        self._r = redis.Redis(host=host, port=port, db=db, decode_responses=True)
 
     # ------------------------------------------------------------------
     # Producer API  (used by Leader)

@@ -6,90 +6,151 @@ import random
 import signal
 from time import sleep, perf_counter
 
-from task import Task
+from infra.logger import logger
 from worker import Worker
 from leader import Leader
 from infra.task_queue import TaskQueue
+from infra.election import ElectionClient
 from infra.watchdog import Watchdog
-from infra.config import REDIS_HOST, REDIS_PORT
-
-
+from infra.supervisor import Supervisor
+from infra.config import (
+    REDIS_HOST, REDIS_PORT, REDIS_DB,
+    CRASH_PROBABILITY, CRASH_CHECK_INTERVAL,
+)
+import multiprocessing.util
+multiprocessing.util.log_to_stderr()
 parser = argparse.ArgumentParser()
-parser.add_argument('--num_workers', type=int, default=4)
-parser.add_argument('--num_tasks', type=int, default=10)
-parser.add_argument('--crash_workers', type=int, default=1, help="Number of workers to crash during execution (default: 1)")
+parser.add_argument(
+    '--mode', choices=["runtime", "num_tasks"], default="runtime")
+parser.add_argument('--runtime', type=float, default=30,
+                    help="Seconds to generate tasks (runtime mode)")
+parser.add_argument('--num_tasks', type=int, default=10,
+                    help="Total tasks to generate (num_tasks mode)")
+parser.add_argument('--num_leaders', type=int, default=2,
+                    help="Number of leader candidates")
+parser.add_argument('--num_workers', type=int, default=4,
+                    help="Number of worker processes")
+parser.add_argument('--crash_prob', type=float, default=CRASH_PROBABILITY,
+                    help="Per-process crash probability per check interval (0 to disable)")
 
 
-def crash_simulator(workers: list[Worker], num_crashes: int):
+# ------------------------------------------------------------------
+# Crash Simulator
+# ------------------------------------------------------------------
+
+def _process_label(proc) -> str:
     """
-    Background thread: Crashes up to `num_crashes` random active workers
-    
-    Waits a short random delay before each kil to ensure workers have had time to pick tasks and are mid-execution.
+    Return a human-readable label for a process.
+    Leader has candidate_id, Worker has worker_id
     """
-    crashes_done = 0
-    while crashes_done < num_crashes:
-        # Wait for workers to start processing tasks
-        delay = random.uniform(1.0, 2.5)
-        sleep(delay)
-        active = [w for w in workers if w.is_alive() and w.state==Worker.State.ACTIVE]
-        # No active workers right now, wait and retry
-        if not active:
-            continue
-        
-        target = random.choice(active)
-        print(f"({int(perf_counter())%100:02d}) CRASH SIMULATOR: Killing worker {target.worker_id} (pid={target.pid})")
-        os.kill(target.pid, signal.SIGKILL)
-        crashes_done += 1
+    if isinstance(proc, Leader):
+        return f"Leader {proc.candidate_id}"
+    if isinstance(proc, Worker):
+        return f"Worker {proc.worker_id}"
+    return proc.name
 
-def process(num_workers: int, num_tasks: int, crash_workers: int):
+
+def crash_simulator(processes: list[multiprocessing.Process], crash_prob: float):
+    """
+    Background thread. Every CRASH_CHECK_INTERVAL seconds, each alive process independently rolls against crash_prob.
+    If it hits, its terminated.
+
+    Allows for multiple processes crashing simultaneously (eg: leader and worker crash together).
+
+    Args:
+        processes (list[Process]): a flat list of all crashable processes (leaders + workers).
+    """
+    while True:
+        sleep(CRASH_CHECK_INTERVAL)
+        for proc in list(processes):
+            if not proc.is_alive():
+                continue
+            if random.random() < crash_prob:
+                label = _process_label(proc)
+                logger.error(f"CRASH SIMULATOR: Killing {label} (pid={proc.pid})")
+
+                try:
+                    os.kill(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass    # already dead, ignore
+
+
+# ------------------------------------------------------------------
+# Entry point
+# ------------------------------------------------------------------
+
+def process(mode: str, runtime: float, num_tasks: int, num_leaders: int, num_workers: int, crash_prob: float):
     if num_workers > 10:
-        print("Max number of workers allowed is 10")
+        logger.warning("Max number of workers allowed is 10")
         return
-    if num_workers <= crash_workers:
-        print("Please ensure there are more workers than number of crashes.")
+    if num_leaders > 5:
+        logger.warning("Max number of leader candidates allowed is 5")
+        return
 
-    # Clear any leftover tasks from earlier runs
-    TaskQueue(host=REDIS_HOST, port=REDIS_PORT).clear()
-    
-    # Start the watchdog (monitor task completion, manages recovery in case of worker crash)
-    watchdog = Watchdog(host=REDIS_HOST, port=REDIS_PORT)
+    # Clear all Redis state from earlier runs
+    TaskQueue(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB).clear()
+    ElectionClient("_init", host=REDIS_HOST,
+                   port=REDIS_PORT, db=REDIS_DB).clear()
+
+    # 1. Start the watchdog (monitor task completion, manages recovery in case of worker crash)
+    watchdog = Watchdog(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
     watchdog.start()
 
-    # Start the workers, they wait until tasks are pushed into queue by leader, then consume
-    workers = [Worker(worker_id=chr(i + ord('A')), host=REDIS_HOST, port=REDIS_PORT)
-               for i in range(num_workers)]
+    # 2. Start the workers, they wait until tasks are pushed into queue by leader, then consume
+    workers = [
+        Worker(
+            worker_id=chr(i + ord('A')),
+            host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB,
+        )
+        for i in range(num_workers)
+    ]
     for worker in workers:
         worker.start()
 
-    # Start the crash simulator in a background thread
-    if crash_workers > 0:
-        crash_thread = threading.Thread(
-            target=crash_simulator,
-            args=(workers, crash_workers),
-            daemon=True
+    # 3. Start leader candidates
+    leaders = [
+        Leader(
+            candidate_id=f"L{i+1}", mode=mode, runtime=runtime,
+            num_tasks=num_tasks, host=REDIS_HOST,
+            port=REDIS_PORT, db=REDIS_DB,
         )
-        crash_thread.start()
+        for i in range(num_leaders)
+    ]
+    for leader in leaders:
+        leader.start()
 
-    # Leader pushes the tasks into waiting queue
-    tasks = [Task(id=i+1, payload={"job": f"task_{i+1}"}) for i in range(num_tasks)]
-    leader = Leader(tasks=tasks, host=REDIS_HOST, port=REDIS_PORT)
+    # 4. Start supervisor
+    supervisor = Supervisor(
+        leaders=leaders, workers=workers, mode=mode, runtime=runtime,
+        num_tasks=num_tasks, host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB,
+    )
+    supervisor.start()
+
+    # 5. Start the crash simulator in a background thread
+    if crash_prob > 0:
+        threading.Thread(
+            target=crash_simulator,
+            args=(leaders+workers, crash_prob),
+            daemon=True,
+            name="Crash Simulator"
+        ).start()
 
     start = perf_counter()
-    leader.run()
 
-    # Wait for workers to finish
-    for worker in workers:
-        worker.join()
+    # 6. Wait for supervisor to exit. Supervisor handles the leader/worker lifecycle (respawn+join)
+    supervisor.join()
 
     elapsed = perf_counter() - start
-    print(f"Total time: {elapsed:.2f}s")
-    
+    logger.info(f"Total time: {elapsed:.2f}s")
+
     # Stop watchdog
     watchdog.stop()
     watchdog.join(timeout=5)
 
 
 if __name__ == '__main__':
-    multiprocessing.set_start_method('spawn', force=True)
+    if multiprocessing.get_start_method(allow_none=True) is None:
+        multiprocessing.set_start_method('spawn')
+    
     args = parser.parse_args()
     process(**vars(args))

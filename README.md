@@ -1,132 +1,130 @@
-# Distributed Worker System (v4 - Fault-Tolerant Execution with Recovery)
+# Distributed Task Processing System
 
 ## Overview
 
-> This is v4 of a multi-stage project evolving into a fully distributed system.
+A fault-tolerant distributed task processing system built using Redis, designed to simulate real-world worker orchestration under failures.
 
-This version introduces **fault tolerance and task recovery**, transforming the system into a **reliable distributed task processor**.
-
-Workers can now crash during execution, and tasks are automatically recovered and reprocessed using a **heartbeat + watchdog mechanism**.
+The system demonstrates:
+- Distributed producer-consumer architecture
+- Leader election with failover
+- Worker crash recovery
+- Task durability via heartbeat + watchdog monitoring
+- Process supervision to maintain system liveness
 
 ---
 
 ## Architecture
 
 ### Leader (Producer)
-- Pushes tasks into Redis queue
-- Has no knowledge of workers
-- Does not participate in task execution or recovery
-
-### Worker (Consumer)
-- Runs as an independent OS process
-- Pulls tasks from Redis (`BRPOP`)
-- Registers task as "in-progress" with TTL
-- Sends periodic heartbeats to maintain ownership
-- Acknowledges task completion
-- Can crash mid-execution (simulated)
-
-### Watchdog (Recovery Process)
-- Independent process monitoring task execution
-- Scans for tasks nearing TTL expiry
-- Re-queues tasks whose workers likely crashed
-
-### Task
-- Represents a unit of work
-- Serialized to JSON
-- Moves through states:
-  - `PENDING → IN_PROGRESS → DONE`
+- Multiple leader *candidates* compete for a Redis-based lock
+- Exactly one leader is active at a time
+- Generates tasks continuously (runtime mode) or up to a fixed count (num_tasks mode)
+- Automatically fails over if the active leader crashes
 
 ---
 
-## Redis Data Model
+### Worker (Consumer)
+- Independent OS processes consuming tasks from Redis
+- Execute tasks and periodically heartbeat to signal liveness
+- Exit automatically after prolonged inactivity
+- Restarted by supervisor if they crash
 
-### Main Queue
-- Key: `task_queue`
-- Type: List
-- Operations:
-  - `LPUSH` → enqueue
-  - `BRPOP` → dequeue
+---
 
-### Processing Keys
-- Key: `processing:{task_id}`
-- Type: String (serialized task)
-- TTL-based ownership tracking
+### Watchdog (Failure Detector)
+- Monitors in-flight tasks via Redis keys with TTL
+- Detects tasks whose workers have crashed (no heartbeat)
+- Re-queues such tasks for retry
+
+---
+
+### Supervisor (Process Manager)
+- Background thread monitoring all workers and leader candidates
+- Restarts processes that crash unexpectedly
+- Ensures eventual availability of:
+  - at least one leader
+  - sufficient workers
+
+---
+
+### Task Queue (Redis)
+- Central coordination layer
+- Uses:
+  - `LPUSH` → enqueue tasks
+  - `BRPOP` → blocking dequeue
+- Tracks in-progress tasks via TTL-based keys
 
 ---
 
 ## Execution Flow
 
-1. Workers start and block on queue (`BRPOP`)
-2. Leader enqueues tasks into Redis
-3. Worker:
-   - pops task
-   - registers processing key with TTL
-   - starts heartbeat loop
-4. Worker executes task
-5. On success:
-   - worker acknowledges task (deletes processing key)
-6. If worker crashes:
-   - heartbeat stops
-   - TTL expires
-7. Watchdog:
-   - detects expiring tasks
-   - requeues them
+1. System initializes and clears previous state
+2. Workers start and wait on Redis queue
+3. Leader candidates start and compete for leadership
+4. Elected leader begins generating tasks
+5. Workers:
+   - fetch tasks
+   - register processing state (with TTL)
+   - heartbeat during execution
+6. If a worker crashes:
+   - its task TTL expires
+   - watchdog detects and re-queues task
+7. Supervisor:
+   - detects crashed processes
+   - restarts them
+8. System shuts down after:
+   - leader finishes generation
+   - all tasks are processed
+   - workers exit after idle cycles
 
 ---
 
-## Failure Handling Model
+## Modes of Operation
 
-### Heartbeat Mechanism
-- Workers periodically renew TTL on processing keys
-- Ensures active tasks are not reclaimed
+### Runtime Mode
+- Leader generates tasks for a fixed duration
+- Failover leaders continue remaining time
 
-### Watchdog Recovery
-- Scans processing keys
-- Requeues tasks nearing expiry
-
-### Crash Simulation
-- Random worker processes are killed using `SIGKILL`
-- Recovery is verified through task re-execution
+### Num Tasks Mode
+- Leader generates a fixed number of tasks
+- Counter stored in Redis ensures consistency across failovers
 
 ---
 
-## Important Design Notes
+## Key Design Concepts
 
-### Task Status in Redis
+- **Leader Election**
+  - Redis `SET NX EX` used for distributed locking
+  - TTL + heartbeat ensures automatic failover
 
-> Task status stored in Redis is **not authoritative**.
+- **Heartbeat-Based Liveness**
+  - Workers renew task TTL periodically
+  - Absence of heartbeat implies failure
 
-- It is not used for scheduling
-- It exists only for reconstruction during recovery
-- Actual execution state is derived from:
-  - queue presence
-  - processing key existence
+- **Failure Recovery**
+  - Watchdog re-queues abandoned tasks
+  - Supervisor restarts crashed processes
+
+- **Decoupled Architecture**
+  - Producers and consumers communicate only via Redis
+  - No direct process dependencies
 
 ---
 
-### Delivery Semantics
-
-This system provides:
+## Known Limitations
 
 - **At-least-once execution**
+  - Tasks may be executed more than once in rare race conditions
 
-This means:
-- Tasks may execute more than once in rare edge cases
-- No task is permanently lost
+- **Non-atomic dequeue + register**
+  - A crash between `BRPOP` and processing registration may lead to task loss  
+  - Production systems typically use `BRPOPLPUSH` or Redis Streams to avoid this
 
----
+- **No idempotency guarantees**
+  - Tasks are assumed to be safe for retry
 
-### Timing Guarantees
-
-To avoid false recovery:
-
-```
-PROCESSING_TTL - HEARTBEAT_INTERVAL > EXPIRY_CHECK_THRESHOLD
-```
-
-This ensures:
-- Active tasks are not mistakenly requeued
-- Expired tasks are reliably detected
+- **Single Redis instance**
+  - No replication or clustering
 
 ---
 
@@ -195,65 +193,32 @@ Update these values if:
 ---
 
 ### 2. Run the system
-
 ```bash
-python main.py --num_workers=4 --num_tasks=10 --crash_workers=2
+python main.py --mode runtime --runtime 30 --num_workers 4 --num_leaders 2
 ```
 
-Simulates worker failures to test recovery.
+or
 
----
-
-## Key Concepts Demonstrated
-
-- Distributed task queue (Redis)
-- Producer-consumer architecture
-- Fault-tolerant processing
-- Heartbeat-based liveness detection
-- TTL-based coordination
-- Watchdog recovery pattern
-- At-least-once delivery semantics
-- Failure simulation and validation
-
----
-
-## Improvements Over v3
-
-| Feature | v3 | v4 |
-|--|--|--|
-| Task reliability | ❌ | ✅ |
-| Crash recovery | ❌ | ✅ |
-| Heartbeat | ❌ | ✅ |
-| Watchdog | ❌ | ✅ |
-| Delivery guarantees | None | At-least-once |
-
----
-
-## Limitations (v4)
-
-- Possible duplicate execution (no deduplication)
-- No leader election (single producer)
-- No task prioritization
-- No observability system (logs only)
-- No backpressure handling
-
----
-
-## Future Improvements
-
-- Leader election (high availability)
-- Deduplication / idempotency layer
-- Metrics and observability (Grafana, Prometheus)
-- Rate limiting and throttling
-- Variable task complexity and duration
+```bash
+python main.py --mode num_tasks --num_tasks 20 --num_workers 4 --num_leaders 2
+```
 
 ---
 
 ## Tech Stack
 
-- Python
-- multiprocessing
-- Redis
-- threading (heartbeat + crash simulation)
+- Python (multiprocessing, threading)
+- Redis (queue + coordination)
+- JSON (task serialization)
+
+---
+
+## What This Demonstrates
+
+- Distributed coordination using external state (Redis)
+- Leader election with failover
+- Fault-tolerant task execution
+- Process supervision and recovery
+- Realistic failure simulation (random crashes)
 
 ---
