@@ -56,6 +56,31 @@ The system demonstrates:
 
 ---
 
+## Project Structure
+
+```text
+.
+├── README.md
+├── infra
+│   ├── config.py
+│   ├── election.py
+│   ├── logger.py
+│   ├── metrics.py
+│   ├── supervisor.py
+│   ├── task_queue.py
+│   └── watchdog.py
+├── monitoring
+│   └── prometheus.yml
+├── leader.py
+├── main.py
+├── requirements.txt
+├── run_prometheus.sh
+├── task.py
+└── worker.py
+```
+
+---
+
 ## Execution Flow
 
 1. System initializes and clears previous state
@@ -76,6 +101,34 @@ The system demonstrates:
    - leader finishes generation
    - all tasks are processed
    - workers exit after idle cycles
+
+---
+
+## Observability
+
+The system exposes Prometheus metrics for monitoring runtime behaviour and failure recovery.
+
+### Exposed Metrics
+
+- `tasks_processed_total`
+  - Successfully completed tasks
+
+- `tasks_recovered_total`
+  - Tasks recovered and re-queued by the watchdog
+
+- `worker_crashes_total`
+  - Worker crashes detected by the supervisor
+
+- `leader_crashes_total`
+  - Leader candidate crashes detected by the supervisor
+
+- `queue_size`
+  - Current number of pending tasks in Redis
+
+Metrics endpoint:
+```text
+http://localhost:9191/metrics
+```
 
 ---
 
@@ -130,7 +183,15 @@ The system demonstrates:
 
 ## How to Run
 
-### 1. Start Redis
+### 1. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+### 2. Start Redis
 
 This system requires a running Redis instance.
 
@@ -163,7 +224,7 @@ redis-server
 
 Redis connection settings are defined in:
 
-```
+```text
 infra/config.py
 ```
 
@@ -179,28 +240,55 @@ Update these values if:
 
 ---
 
-#### Notes
+### 3. Install and Run Prometheus (Optional)
 
-- If Redis is running directly on your machine (`redis-server`):
-  - use `127.0.0.1` (or `localhost`) as host
+Install Prometheus:
 
-- If Redis is running in Docker with port mapping (`-p 6379:6379`):
-  - use `127.0.0.1` (or `localhost`) as host
+```bash
+sudo apt install -y prometheus
+```
 
-- If both your app and Redis are running inside Docker on the same network:
-  - use the container name as host (e.g., `redis-server`)
+Start the Prometheus server using the included helper script:
+
+```bash
+chmod +x run_prometheus.sh
+./run_prometheus.sh
+```
+
+Prometheus dashboard:
+
+```text
+http://localhost:9090
+```
+
+Metrics endpoint exposed by the application:
+
+```text
+http://localhost:9191/metrics
+```
 
 ---
 
-### 2. Run the system
+### 4. Run the System
+
+Runtime mode:
+
 ```bash
-python main.py --mode runtime --runtime 30 --num_workers 4 --num_leaders 2
+python main.py \
+  --mode runtime \
+  --runtime 30 \
+  --num_workers 4 \
+  --num_leaders 2
 ```
 
-or
+Fixed task-count mode:
 
 ```bash
-python main.py --mode num_tasks --num_tasks 20 --num_workers 4 --num_leaders 2
+python main.py \
+  --mode num_tasks \
+  --num_tasks 20 \
+  --num_workers 4 \
+  --num_leaders 2
 ```
 
 ---
@@ -209,6 +297,7 @@ python main.py --mode num_tasks --num_tasks 20 --num_workers 4 --num_leaders 2
 
 - Python (multiprocessing, threading)
 - Redis (queue + coordination)
+- Prometheus (metrics + observability)
 - JSON (task serialization)
 
 ---
@@ -220,5 +309,6 @@ python main.py --mode num_tasks --num_tasks 20 --num_workers 4 --num_leaders 2
 - Fault-tolerant task execution
 - Process supervision and recovery
 - Realistic failure simulation (random crashes)
+- Basic runtime observability using Prometheus metrics
 
 ---

@@ -2,6 +2,7 @@ import threading
 from time import sleep
 
 from infra.logger import logger
+from infra.metrics import worker_crashes_total, leader_crashes_total
 from worker import Worker
 from leader import Leader
 from infra.config import SUPERVISOR_INTERVAL
@@ -54,9 +55,13 @@ class Supervisor(threading.Thread):
                 # Reap exited process before dropping reference (avoid zombies)
                 dead.join(timeout=0.1)
                 self._workers.remove(dead)
+                
                 # If worker exited cleanly, dont spawn replacement
                 if dead.clean_exit.is_set():
                     continue
+                
+                # Worker crashed - spawn replacment
+                worker_crashes_total.inc()
                 replacement = Worker(worker_id=dead.worker_id, host=self._host, port=self._port, db=self._db)
                 replacement.start()
                 self._workers.append(replacement)
@@ -77,9 +82,13 @@ class Supervisor(threading.Thread):
                 # Reap exited process before dropping reference (avoid zombies)
                 dead.join(timeout=0.1)
                 self._leaders.remove(dead)
+                
                 # If leader-candidate exited cleanly, dont spawn replacement
                 if dead.clean_exit.is_set():
                     continue
+                
+                # Leader candidate crashed - spawn replacement
+                leader_crashes_total.inc()
                 new_id = self._next_leader_id()
                 replacement = Leader(
                     candidate_id=new_id, mode=self._mode, runtime=self._runtime,

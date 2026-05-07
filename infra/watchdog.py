@@ -2,6 +2,7 @@ import multiprocessing
 from time import sleep
 
 from infra.logger import logger
+from infra.metrics import tasks_recovered_total
 from infra.task_queue import TaskQueue
 from infra.config import REDIS_HOST, REDIS_PORT, REDIS_DB, SCAN_INTERVAL
 
@@ -29,6 +30,7 @@ class Watchdog(multiprocessing.Process):
             for task in expired:
                 logger.warning(f"Watchdog: recovering Task {task.id}: TTL expired, re-queueing")
                 queue.requeue(task)
+                tasks_recovered_total.inc()
 
             sleep(SCAN_INTERVAL)
 

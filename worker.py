@@ -5,6 +5,7 @@ from time import sleep
 from enum import Enum
 
 from infra.logger import logger
+from infra.metrics import tasks_processed_total
 from task import Task
 from infra.task_queue import TaskQueue
 from infra.config import REDIS_HOST, REDIS_PORT, REDIS_DB, HEARTBEAT_INTERVAL, MAX_IDLE_CYCLES
@@ -128,6 +129,7 @@ class Worker(multiprocessing.Process):
             success = self._execute(task)
             if success:
                 self._queue.acknowledge(task.id)
+                tasks_processed_total.inc()
 
             task.status = Task.Status.DONE
             self._set_state(Worker.State.IDLE)

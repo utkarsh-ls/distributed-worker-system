@@ -75,3 +75,10 @@ TASK_INTERVAL_MAX = 3.0     # maximum gap between task generations (seconds)
 CRASH_PROBABILITY = 0.3     # per-process probability of crashing per check interval
 CRASH_CHECK_INTERVAL = 5    # seconds between crash probability rolls
 SUPERVISOR_INTERVAL = 5     # health check timer for supervisor (starts new worker/leader processes upon crash)
+
+# ------------------------------------------------------------------ #
+#  Metrics (Prometheus Client)                                        #
+# ------------------------------------------------------------------ #
+
+PROMETHEUS_MULTIPROC_DIR = "/tmp/prometheus_multiproc"
+METRICS_PORT = 9191

@@ -2,11 +2,18 @@ import argparse
 import multiprocessing
 import threading
 import os
+import shutil
 import random
 import signal
 from time import sleep, perf_counter
 
+# Clear any metric data from earlier runs (before infra.metrics import, or counters will get deleted)
+from infra.config import PROMETHEUS_MULTIPROC_DIR
+shutil.rmtree(PROMETHEUS_MULTIPROC_DIR, ignore_errors=True)
+os.makedirs(PROMETHEUS_MULTIPROC_DIR, exist_ok=True)
+
 from infra.logger import logger
+from infra.metrics import start_metrics_server
 from worker import Worker
 from leader import Leader
 from infra.task_queue import TaskQueue
@@ -14,11 +21,10 @@ from infra.election import ElectionClient
 from infra.watchdog import Watchdog
 from infra.supervisor import Supervisor
 from infra.config import (
-    REDIS_HOST, REDIS_PORT, REDIS_DB,
+    REDIS_HOST, REDIS_PORT, REDIS_DB, METRICS_PORT,
     CRASH_PROBABILITY, CRASH_CHECK_INTERVAL,
 )
-import multiprocessing.util
-multiprocessing.util.log_to_stderr()
+
 parser = argparse.ArgumentParser()
 parser.add_argument(
     '--mode', choices=["runtime", "num_tasks"], default="runtime")
@@ -89,8 +95,10 @@ def process(mode: str, runtime: float, num_tasks: int, num_leaders: int, num_wor
 
     # Clear all Redis state from earlier runs
     TaskQueue(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB).clear()
-    ElectionClient("_init", host=REDIS_HOST,
-                   port=REDIS_PORT, db=REDIS_DB).clear()
+    ElectionClient("_init", host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB).clear()
+    
+    # Start metrics server
+    metrics_server = start_metrics_server(METRICS_PORT)
 
     # 1. Start the watchdog (monitor task completion, manages recovery in case of worker crash)
     watchdog = Watchdog(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
@@ -111,8 +119,7 @@ def process(mode: str, runtime: float, num_tasks: int, num_leaders: int, num_wor
     leaders = [
         Leader(
             candidate_id=f"L{i+1}", mode=mode, runtime=runtime,
-            num_tasks=num_tasks, host=REDIS_HOST,
-            port=REDIS_PORT, db=REDIS_DB,
+            num_tasks=num_tasks, host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB,
         )
         for i in range(num_leaders)
     ]
@@ -132,7 +139,7 @@ def process(mode: str, runtime: float, num_tasks: int, num_leaders: int, num_wor
             target=crash_simulator,
             args=(leaders+workers, crash_prob),
             daemon=True,
-            name="Crash Simulator"
+            name="Crash Simulator",
         ).start()
 
     start = perf_counter()
@@ -143,9 +150,10 @@ def process(mode: str, runtime: float, num_tasks: int, num_leaders: int, num_wor
     elapsed = perf_counter() - start
     logger.info(f"Total time: {elapsed:.2f}s")
 
-    # Stop watchdog
+    # Stop watchdog, metrics server
     watchdog.stop()
     watchdog.join(timeout=5)
+    metrics_server.join(timeout=5)
 
 
 if __name__ == '__main__':
